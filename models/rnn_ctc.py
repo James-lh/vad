@@ -18,7 +18,7 @@
 
 import tensorflow as tf
 from utils.common import describe
-from utils.stft import tf_frame
+from utils.shape import tf_frame
 from tensorflow.python.ops.rnn import dynamic_rnn
 from tensorflow.contrib.rnn import GRUCell
 import librosa

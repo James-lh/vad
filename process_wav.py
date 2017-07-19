@@ -13,7 +13,7 @@
 '''
 import librosa
 import numpy as np
-from config.attention_config import get_config
+from config.dnn_config import get_config
 import pickle
 import tensorflow as tf
 from utils.common import check_dir, path_join, increment_id
@@ -32,8 +32,6 @@ global_len = []
 temp_list = []
 error_list = []
 
-label_dict = config.label_dict
-
 
 def pre_emphasis(signal, coefficient=0.97):
     '''对信号进行预加重
@@ -45,29 +43,24 @@ def pre_emphasis(signal, coefficient=0.97):
 
 
 def time2frame(second, sr=config.samplerate, n_fft=config.fft_size,
-               step_size=config.hop_size):
-    return int((second * sr - (n_fft // 2)) / step_size) if second > 0 else 0
+               hop_size=config.hop_size):
+    return int((second * sr) / hop_size)
 
 
-def point2frame(point, sr=config.samplerate, n_fft=config.fft_size,
-                step_size=config.hop_size):
-    return (point - (n_fft // 2)) // step_size
+def point2frame(point, step_size=config.hop_size):
+    return point / step_size
 
 
-def convert_label(label):
-    assert len(label) > 0
-    label_values = [0]
-    for c in label:
-        label_values.append(label_dict.get(c, 4))
-        label_values.append(0)
-    label_shape = len(label_values)
-    label_indices = range(len(label_values))
-
-    return label_values, label_indices, label_shape
+def convert_label(times, seq_len):
+    label = np.zeros([seq_len, 1], dtype=np.int32)
+    for start, end in times:
+        fr_start = time2frame(start)
+        fr_end = time2frame(end)
+        label[fr_start:fr_end + 1] = 1
+    return label
 
 
 def process_stft(f):
-
     y, sr = librosa.load(f, sr=config.samplerate)
     if config.pre_emphasis:
         y = pre_emphasis(y)
@@ -97,28 +90,25 @@ def make_record(f, label):
     # print(text)
     spectrogram, wave = process_stft(f)
     seq_len = spectrogram.shape[0]
-    label_values, label_indices, label_shape = convert_label(label)
+    label = convert_label(label, seq_len)
 
-    return spectrogram, seq_len, label_values, label_indices, label_shape
+    return spectrogram, seq_len, label
 
 
-def make_trainning_example(spectrogram, seq_len, label_values, label_indices,
-                           label_shape):
+def make_example(spectrogram, seq_len, label):
     spectrogram = spectrogram.tolist()
+    label = label.tolist()
     ex = tf.train.SequenceExample()
 
     ex.context.feature["seq_len"].int64_list.value.append(seq_len)
-    ex.context.feature["label_values"].int64_list.value.extend(label_values)
-    ex.context.feature["label_indices"].int64_list.value.extend(label_indices)
-    ex.context.feature["label_shape"].int64_list.value.append(label_shape)
 
     fl_audio = ex.feature_lists.feature_list["audio"]
-
-    if label_shape > seq_len:
-        raise Exception('invalid label!!!!')
-
     for frame in spectrogram:
         fl_audio.feature.add().float_list.value.extend(frame)
+
+    int_label = ex.feature_lists.feature_list['label']
+    for frame in label:
+        int_label.feature.add().int64_list.value.extend(frame)
     return ex
 
 
@@ -135,118 +125,46 @@ def make_noise_example(spectrogram):
     return ex
 
 
-def make_valid_example(spectrogram, seq_len, correctness, label, name):
-    spectrogram = spectrogram.tolist()
-    ex = tf.train.SequenceExample()
-
-    ex.context.feature["seq_len"].int64_list.value.append(seq_len)
-    ex.context.feature['label'].int64_list.value.extend(label)
-    ex.context.feature['name'].bytes_list.value.append(
-        name.encode(encoding="utf-8"))
-    ex.context.feature["correctness"].int64_list.value.append(correctness)
-
-    fl_audio = ex.feature_lists.feature_list["audio"]
-    for frame in spectrogram:
-        fl_audio.feature.add().float_list.value.extend(frame)
-
-    return ex
-
-
-def batch_padding_trainning(tup_list):
+def batch_padding(tup_list):
+    # tuple : (spec,labels,seqlen)
     new_list = []
-    max_len = max([t[1] for t in tup_list])
+    max_len = max([len(t[0]) for t in tup_list])
 
     for t in tup_list:
-        assert (len(t[0]) == t[1])
+        assert (len(t[0]) == len(t[1]))
         paded_wave = np.pad(t[0], pad_width=(
             (0, max_len - t[0].shape[0]), (0, 0)),
                             mode='constant', constant_values=0)
-
-        new_list.append((paded_wave, t[1], t[2], t[3], t[4]))
-    return new_list
-
-
-def batch_padding_valid(tup_list):
-    new_list = []
-    max_len = max([t[1] for t in tup_list])
-
-    for t in tup_list:
-        paded_wave = np.pad(t[0], pad_width=(
+        paded_label = np.pad(t[1], pad_width=(
             (0, max_len - t[0].shape[0]), (0, 0)),
-                            mode='constant', constant_values=0)
-        new_list.append((paded_wave, t[1], t[2], t[3], t[4]))
+                             mode='constant', constant_values=0)
 
+        new_list.append((paded_wave, paded_label, t[2]))
     return new_list
-
-
-def generate_valid_data(pkl_path):
-    with open(pkl_path, 'rb') as f:
-        wav_list = pickle.load(f)
-    print('read pkl from %s' % f)
-    audio_list = [i[0] for i in wav_list]
-    correctness_list = [i[1] for i in wav_list]
-    label_list = [i[2] for i in wav_list]
-    assert len(audio_list) == len(correctness_list)
-    tuple_list = []
-    counter = 0
-    record_count = 0
-    for audio_name, correctness, label in zip(audio_list, correctness_list,
-                                              label_list):
-        spectrogram, wave = process_stft(path_join(wave_valid_dir, audio_name))
-        seq_len = spectrogram.shape[0]
-        label_values, _, _ = convert_label(label)
-
-        tuple_list.append(
-            (spectrogram, seq_len, correctness, label_values, audio_name))
-        counter += 1
-        if counter == config.tfrecord_size:
-            tuple_list = batch_padding_valid(tuple_list)
-            fname = 'valid' + increment_id(record_count, 5) + '.tfrecords'
-            ex_list = [
-                make_valid_example(spec, seq_len, correctness, label_values,
-                                   audio_name) for
-                spec, seq_len, correctness, label_values, audio_name in
-                tuple_list]
-            writer = tf.python_io.TFRecordWriter(
-                path_join(save_valid_dir, fname))
-            for ex in ex_list:
-                writer.write(ex.SerializeToString())
-            writer.close()
-            record_count += 1
-            counter = 0
-            tuple_list.clear()
-            print(fname, 'created')
-    print('save in %s' % save_valid_dir)
 
 
 def generate_trainning_data(path):
     with open(path, 'rb') as f:
         wav_list = pickle.load(f)
     print('read pkl from %s' % f)
-    audio_list = [i[0] for i in wav_list]
+    # each record should be (file.wav,((st,end),(st,end).....)))
+    file_list = [i[0] for i in wav_list]
     label_list = [i[1] for i in wav_list]
-    text_list = [i[2] for i in wav_list]
-    assert len(audio_list) == len(text_list)
     tuple_list = []
     counter = 0
     record_count = 0
-    for i, audio_name in enumerate(audio_list):
-        spec, seq_len, label_values, label_indices, label_shape = make_record(
+    for i, audio_name in enumerate(file_list):
+        spec, seq_len, labels = make_record(
             path_join(wave_train_dir, audio_name),
             label_list[i])
-        # print(text_list[i])
-        # print(label_values)
-        if spec is not None:
-            counter += 1
-            tuple_list.append(
-                (spec, seq_len, label_values, label_indices, label_shape))
+        counter += 1
+
+        tuple_list.append((spec, labels, seq_len))
         if counter == config.tfrecord_size:
-            tuple_list = batch_padding_trainning(tuple_list)
+            tuple_list = batch_padding(tuple_list)
             fname = 'data' + increment_id(record_count, 5) + '.tfrecords'
-            ex_list = [make_trainning_example(spec, seq_len, label_values,
-                                              label_indices, label_shape) for
-                       spec, seq_len, label_values, label_indices, label_shape
-                       in tuple_list]
+            ex_list = [make_example(spec, seq_len, labels) for
+                       spec, labels, seq_len in tuple_list]
             writer = tf.python_io.TFRecordWriter(
                 path_join(save_train_dir, fname))
             for ex in ex_list:
@@ -257,6 +175,40 @@ def generate_trainning_data(path):
             tuple_list.clear()
             print(fname, 'created')
     print('save in %s' % save_train_dir)
+
+
+def generate_valid_data(path):
+    with open(path, 'rb') as f:
+        wav_list = pickle.load(f)
+    print('read pkl from %s' % f)
+    # each record should be (file.wav,((st,end),(st,end).....)))
+    file_list = [i[0] for i in wav_list]
+    label_list = [i[1] for i in wav_list]
+    tuple_list = []
+    counter = 0
+    record_count = 0
+    for i, audio_name in enumerate(file_list):
+        spec, seq_len, labels = make_record(
+            path_join(wave_valid_dir, audio_name),
+            label_list[i])
+
+        counter += 1
+        tuple_list.append((spec, labels, seq_len))
+        if counter == config.tfrecord_size:
+            tuple_list = batch_padding(tuple_list)
+            fname = 'data' + increment_id(record_count, 5) + '.tfrecords'
+            ex_list = [make_example(spec, seq_len, labels) for
+                       spec, labels, seq_len in tuple_list]
+            writer = tf.python_io.TFRecordWriter(
+                path_join(save_valid_dir, fname))
+            for ex in ex_list:
+                writer.write(ex.SerializeToString())
+            writer.close()
+            record_count += 1
+            counter = 0
+            tuple_list.clear()
+            print(fname, 'created')
+    print('save in %s' % save_valid_dir)
 
 
 def generate_noise_data(path):
@@ -316,70 +268,17 @@ def sort_wave(pkl_path):
     print(len(y))
 
 
-def shuffle(pkl_path):
-    import random
-    new_list = []
-    batch = 4096
-    with open(pkl_path, 'rb') as f:
-        wave_list = pickle.load(f)
-    total = 0
-
-    for i in range(len(wave_list) // batch):
-        print('batch', i)
-
-        temp = wave_list[i * batch:(i + 1) * batch]
-        # flag = False
-        # for k in temp:
-        #     if len(k[1]) > 0:
-        #         flag = True
-        #         break
-        # if not flag:
-        #     print('fuck', i)
-
-        ok = False
-        again = 0
-
-        while not ok and again < 100:
-            count = 0
-            random.shuffle(temp)
-            c = 0
-            for j in range(batch // 32):
-                subok = False
-                small_batch = temp[j * 32:(j + 1) * 32]
-                for record in small_batch:
-                    if '你好' in record[2] or '乐乐' in record[2]:
-                        subok = True
-                        break
-                if subok:
-                    c += 1
-                    continue
-                else:
-                    print(i, 'again')
-                    again += 1
-                    break
-
-            if c == batch // 32:
-                ok = True
-        new_list.extend(temp)
-    print(len(wave_list))
-    new_list.extend(wave_list[len(wave_list) // batch * batch:])
-    print(len(new_list))
-    with open(pkl_path + '.shuffled', "wb") as f:
-        pickle.dump(new_list, f)
-
-
 if __name__ == '__main__':
     check_dir(save_train_dir)
     check_dir(save_valid_dir)
     check_dir(save_noise_dir)
 
-    base_pkl = 'ctc_23w.pkl'
+    # base_pkl = 'train.pkl'
     # sort_wave(wave_train_dir + base_pkl)
-    # # shuffle(wave_train_dir + base_pkl + '.sorted')
     # generate_trainning_data(
-    #     wave_train_dir + base_pkl + '.sorted.shuffled')
+    #     wave_train_dir + base_pkl + '.sorted')
 
-    # sort_wave(wave_valid_dir + "ctc_valid_pinyin.pkl")
-    generate_valid_data(wave_valid_dir + "ctc_valid.pkl.sorted")
+    sort_wave(wave_valid_dir + "valid.pkl")
+    generate_valid_data(wave_valid_dir + "valid.pkl.sorted")
 
     # generate_noise_data(wave_noise_dir + 'noise.pkl')

@@ -26,11 +26,11 @@ import numpy as np
 import tensorflow as tf
 from glob import glob
 from tensorflow.python.framework import graph_util
-from config import attention_config, rnn_config
-from models import attention_ctc, rnn_ctc
+from config import attention_config, rnn_config,dnn_config
+from models import dnn
 from reader import read_dataset
 from utils.common import check_dir, path_join
-from utils.prediction import evaluate, ctc_predict, ctc_decode
+from utils.prediction import frame_accurcacy
 
 from utils.wer import WERCalculator
 
@@ -84,8 +84,7 @@ class Runner(object):
             sess.run(tf.local_variables_initializer())
             tf.Graph.finalize(graph)
 
-            best_miss = 1
-            best_false = 1
+            best_accuracy = 0
             accu_loss = 0
             st_time = time.time()
             epoch_step = config.tfrecord_size * self.data.train_file_size // config.batch_size
@@ -121,7 +120,7 @@ class Runner(object):
                 signal.signal(signal.SIGTERM, handler_stop_signals)
 
                 best_list = []
-                best_threshold = 0.08
+                best_threshold = 0.9
                 best_count = 0
                 # (miss,false,step,best_count)
 
@@ -175,16 +174,13 @@ class Runner(object):
                             print('epoch time ', (time.time() - last_time) / 60)
                             last_time = time.time()
 
-                            miss_count = 0
-                            false_count = 0
-                            target_count = 0
-                            wer = 0
+                            total = 0
+                            wrong = 0
                             valid_batch = self.data.valid_file_size * config.tfrecord_size // config.batch_size
                             text = ""
                             for i in range(valid_batch):
-                                softmax, correctness, labels, _, _ = sess.run(
-                                    [self.valid_model.softmax,
-                                     self.valid_model.correctness,
+                                logits, labels, _, _ = sess.run(
+                                    [self.valid_model.outputs,
                                      self.valid_model.labels,
                                      self.valid_model.stage_op,
                                      self.valid_model.input_filequeue_enqueue_op])
@@ -199,41 +195,20 @@ class Runner(object):
                                 # for i in names:
                                 #     print(i.decode())
                                 # print(softmax.shape)
-                                decode_output = [ctc_decode(s) for s in softmax]
-                                for i in decode_output:
-                                    text += str(i) + '\n'
-                                    text += str(labels) + '\n'
-                                    text += '=' * 20 + '\n'
-                                result = [ctc_predict(seq) for seq in
-                                          decode_output]
-                                miss, target, false_accept = evaluate(
-                                    result, correctness.tolist())
+                                total_count, wrong_count = frame_accurcacy(
+                                    logits, labels)
+                                total += total_count
+                                wrong += wrong_count
 
-                                miss_count += miss
-                                target_count += target
-                                false_count += false_accept
-
-                                wer += self.wer_cal.cal_batch_wer(labels,
-                                                                  decode_output).sum()
-                                # print(miss_count, false_count)
-                            with open('./valid.txt', 'w') as f:
-                                f.write(text)
-
-                            miss_rate = miss_count / target_count
-                            false_accept_rate = false_count / (
-                                self.data.validation_size - target_count)
+                            accruracy = 1 - wrong / wrong
                             print('--------------------------------')
                             print('epoch %d' % self.epoch)
                             print('training loss:' + str(l))
                             print('learning rate:', lr, 'global step', step)
-                            print('miss rate:' + str(miss_rate))
-                            print('flase_accept_rate:' + str(false_accept_rate))
-                            print(miss_count, '/', target_count)
-                            print('wer', wer / self.data.validation_size)
+                            print('frame accuracy:' + str(accruracy))
 
-                            if miss_rate + false_accept_rate < best_miss + best_false:
-                                best_miss = miss_rate
-                                best_false = false_accept_rate
+                            if accruracy > best_accuracy:
+                                best_accuracy = accruracy
                                 saver.save(sess,
                                            save_path=(path_join(
                                                self.config.save_path,
@@ -241,13 +216,12 @@ class Runner(object):
                                 with open(path_join(
                                         self.config.save_path, 'best.pkl'),
                                         'wb') as f:
-                                    best_tuple = (best_miss, best_false)
+                                    best_tuple = (accruracy,)
                                     pickle.dump(best_tuple, f)
-                            if miss_rate + false_accept_rate < best_threshold:
+                            if accruracy > best_threshold:
                                 best_count += 1
                                 print('best_count', best_count)
-                                best_list.append((miss_rate,
-                                                  false_accept_rate, step,
+                                best_list.append((accruracy, step,
                                                   best_count))
                                 saver.save(sess,
                                            save_path=(path_join(
@@ -260,8 +234,7 @@ class Runner(object):
                             self.epoch, self.config.save_path))
                     saver.save(sess, save_path=(
                         path_join(self.config.save_path, 'latest.ckpt')))
-                    print('best miss rate:%f\tbest false rate"%f' % (
-                        best_miss, best_false))
+                    print('best accuracy:%f' % (best_accuracy))
 
                 except tf.errors.OutOfRangeError:
                     print('Done training -- epoch limit reached')
@@ -276,9 +249,8 @@ class Runner(object):
                     # When done, ask the threads to stop.
 
             else:
-                miss_count = 0
-                false_count = 0
-                target_count = 0
+                total = 0
+                wrong = 0
 
                 valid_batch = self.data.valid_file_size * config.tfrecord_size // config.batch_size
 
@@ -286,44 +258,26 @@ class Runner(object):
                     # if i > 7:
                     #     break
                     ind = 14
-                    ctc_output, ctc_input, correctness, labels, _, _ = sess.run(
-                        [self.valid_model.dense_output,
-                         self.valid_model.nn_outputs,
-                         self.valid_model.correctness,
+                    logits, labels, _, _ = sess.run(
+                        [self.valid_model.outputs,
                          self.valid_model.labels,
                          self.valid_model.stage_op,
                          self.valid_model.input_filequeue_enqueue_op])
                     np.set_printoptions(precision=4,
                                         threshold=np.inf,
                                         suppress=True)
-                    # for output, lab, name in zip(ctc_output, labels, names):
-                    #     print('-' * 20)
-                    #     print(name.decode())
-                    #     print('output', output.tolist())
-                    #     print('golden', lab.tolist())
-                    correctness = correctness.tolist()
-                    result = [ctc_predict(seq) for seq in
-                              ctc_output]
-                    for k, r in enumerate(result):
-                        if r != correctness[k]:
-                            print(ctc_output[k])
-                            print(labels[k])
-                            with open('logits.txt', 'w') as f:
-                                f.write(str(ctc_input[k]))
 
-                    miss, target, false_accept = evaluate(
-                        result, correctness)
+                    total_count, wrong_count = frame_accurcacy(
+                        logits, labels)
+                    total += total_count
+                    wrong += wrong_count
 
-                    miss_count += miss
-                    target_count += target
-                    false_count += false_accept
+                accruracy = 1 - wrong / wrong
 
                 # miss_rate = miss_count / target_count
                 # false_accept_rate = false_count / total_count
                 print('--------------------------------')
-                print('miss rate: %d/%d' % (miss_count, target_count))
-                print('flase_accept_rate: %d/%d' % (
-                    false_count, self.data.validation_size - target_count))
+                print('accurcay: %f' % (accruracy))
 
     def build_graph(self, DeployModel):
         check_dir(self.config.graph_path)
@@ -351,7 +305,7 @@ class Runner(object):
             frozen_graph_def = graph_util.convert_variables_to_constants(
                 session, session.graph.as_graph_def(),
                 ['model/inputX', 'model/rnn_initial_states',
-                 'model/rnn_states','model/softmax'])
+                 'model/rnn_states', 'model/softmax'])
             tf.train.write_graph(
                 frozen_graph_def,
                 os.path.dirname(graph_path),
@@ -370,14 +324,10 @@ if __name__ == '__main__':
 
     flags, model = parse_args()
     print(flags)
-    if model == 'rnn':
-        config = rnn_config.get_config()
-        TrainingModel = rnn_ctc.GRU
-        DeployModel = rnn_ctc.DeployModel
-    elif model == 'attention':
-        config = attention_config.get_config()
-        TrainingModel = attention_ctc.Attention
-        DeployModel = attention_ctc.DeployModel
+    if model == 'dnn':
+        config = dnn_config.get_config()
+        TrainingModel = dnn.DNN
+        DeployModel = dnn.DeployModel
     else:
         raise Exception('model %s not defined!' % model)
     for key in flags:

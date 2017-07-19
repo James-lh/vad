@@ -15,168 +15,22 @@
 import numpy as np
 
 
-
-def ctc_decode(softmax, lockout=3, thres=0.5, loose_thres=0.2):
-    np.set_printoptions(precision=4, threshold=np.inf,
-                        suppress=True)
-    softmax = softmax[:, 1:5]
-    i = 0
-
-    result = []
-    length = softmax.shape[0]
-    loose = False
-
-    while (i < length):
-        if loose:
-            if (softmax[i, :].max() < loose_thres):
-                if result[-1][0] != 3:
-                    i += lockout
-                    loose = False
-                    continue
-            else:
-                if softmax[i, 2] > loose_thres:
-                    result.append((3, i))
-                    i += lockout
-                    loose = False
-                    continue
-                else:
-                    pos = softmax[i, :].argmax() + 1
-                    if softmax[i, pos - 1] > 0.6:
-                        if result[-1][1] + lockout < i:
-                            result.append((pos, i))
-
-        else:
-            if (softmax[i, :].max() > thres):
-                result.append((softmax[i, :].argmax() + 1, i))
-                i += lockout
-                if len(result) >= 3:
-                    temp = [i[0] for i in result[-3:]]
-                    if temp == [1, 2, 3]:
-                        loose = True
-                continue
-        i += 1
-
-    new_result = [0]
-    for i in result:
-        new_result.append(i[0])
-        new_result.append(0)
-    return np.asarray(new_result,dtype=np.int32)
+def frame_accurcacy(logits, labels):
+    # shape=(b,t)
+    assert logits.shape == labels.shape
+    logits = _smoothing(logits)
+    xor = logits ^ labels
+    return xor.size, xor.sum
 
 
-def ctc_predict(seq):
-    text = ''
-    for i in seq:
-        if i < 0:
-            break
-        if i > 0:
-            text += str(i)
-    return 1 if '1233' in text else 0
-    # return 1 if '1233' in text else 0
-
-
-def predict(moving_avg, threshold, lockout, f=None):
-    if f is not None:
-        print(f)
-    # array is 2D array, moving avg for one record, whose shape is (t,p)
-    # label is one-hot, which is also the same size of moving_avg
-    # we assume label[0] is background
-    # return a trigger array, the same size (t,p) (it's sth like mask)
-    # print('=' * 50)
-    num_class = moving_avg.shape[1]
-    len_frame = moving_avg.shape[0]
-    # print(num_class, len_frame)
-    prediction = np.zeros(moving_avg.shape, dtype=np.float32)
-    for i in range(1, num_class):
-        j = 0
-        while j < len_frame:
-            if moving_avg[j][i] > threshold:
-                prediction[j][i] = 1
-            j += 1
-    return prediction
-
-
-def decode(prediction, word_interval, golden):
-    raw = golden
-    keyword = list(raw)
-    # prediction based on moving_avg,shape(t,p),sth like one-hot, but can may overlapping
-    # prediction = prediction[:, 1:]
-    num_class = prediction.shape[1]
-    len_frame = prediction.shape[0]
-    pre = 0
-    inter = 0
-
-    target = keyword.pop()
-    # try:
-    for frame in prediction:
-        if frame.sum() > 0:
-            if pre == 0:
-                assert frame.sum() == 1
-                index = np.nonzero(frame)[0]
-                pre = index[0]
-                if index == target:
-                    if inter < word_interval:
-                        if len(keyword) == 0:
-                            return 1
-                        target = keyword.pop()
-                        continue
-                keyword = list(raw)
-                target = keyword.pop()
-                inter = 0
-                if index == target:
-                    target = keyword.pop()
-                    continue
-            else:
-                if frame[pre] == 1:
-                    continue
-                else:
-                    index = np.nonzero(frame)[0]
-                    pre = index
-                    if index == target:
-                        if len(keyword) == 0:
-                            return 1
-                        target = keyword.pop()
-                    else:
-                        keyword = list(raw)
-                        target = keyword.pop()
-                        if index == target:
-                            if len(keyword) == 0:
-                                return 1
-                            target = keyword.pop()
-                            continue
-        else:
-            if pre == 0:
-                if len(raw) - len(keyword) > 1:
-                    inter += 1
-            else:
-                pre = 0
-
-    return 0
-
-
-def evaluate(result, target):
-    assert len(result) == len(target)
-    # print(target)
-    # print(result)
-    xor = [a ^ b for a, b in zip(target, result)]
-    miss = sum([a & b for a, b in zip(xor, target)])
-    false_accept = sum([a & b for a, b in zip(xor, result)])
-    return miss, sum(target), false_accept
-
-
-def moving_average(array, n=5, padding=True):
-    # array is 2D array, logits for one record, shape (t,p)
-    # return shape (t,p)
-    if n % 2 == 0:
-        raise Exception('n must be odd')
-    if len(array.shape) != 2:
-        raise Exception('must be 2-D array.')
-    if n > array.shape[0]:
-        raise Exception(
-            'n larger than array length. the shape:' + str(array.shape))
-    if padding:
-        pad_num = n // 2
-        array = np.pad(array=array, pad_width=((pad_num, pad_num), (0, 0)),
-                       mode='constant', constant_values=0)
-    array = np.asarray([np.sum(array[i:i + n, :], axis=0) for i in
-                        range(len(array) - 2 * pad_num)]) / n
-    return array
+def _smoothing(logits, step=2):
+    accu = np.copy(logits)
+    for i in range(1, step + 1):
+        shift_before = np.pad(logits[1:], ((0, 0), (0, 1)), mode='constant',
+                              constant_values=0)
+        shift_after = np.pad(logits[:-1], ((0, 0), (1, 0)), mode='constant',
+                             constant_values=0)
+        accu += shift_after
+        accu += shift_before
+    result = np.where(accu > step + 1, 1, 0)
+    return result

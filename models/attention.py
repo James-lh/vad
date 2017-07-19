@@ -17,12 +17,12 @@
 
 
 import tensorflow as tf
-import math
 import librosa
+import math
 from utils.common import describe
-from positional_encoding import positional_encoding_op
-from utils.stft import tf_frame
+from utils.shape import tf_frame, window
 from utils.mfcc import mfcc
+from positional_encoding import positional_encoding_op
 
 
 def self_attention(inputs, config, is_training, scope_name='self_attention'):
@@ -128,40 +128,29 @@ def inference(inputs, seqLengths, config, is_training, batch_size=None):
     return outputs, seqLengths
 
 
-class Attention(object):
+
+class DNN(object):
     def __init__(self, config, input, is_train):
         self.config = config
+
+        stager, self.stage_op, self.input_filequeue_enqueue_op = input
+
+        self.inputX, self.labels, self.seqLengths = stager.get()
         if is_train:
-            stager, self.stage_op, self.input_filequeue_enqueue_op = input
-            # we only use 1 gpu
-            self.inputX, self.label_values, self.label_indices, self.label_dense_shape, self.seqLengths = stager.get()
-            self.label_batch = tf.SparseTensor(
-                self.label_indices,
-                tf.cast(self.label_values, tf.int32),
-                self.label_dense_shape)
-            self.build_graph(config, is_train)
-        else:
-            stager, self.stage_op, self.input_filequeue_enqueue_op = input
-            self.inputX, self.seqLengths, self.correctness, self.labels = stager.get()
-            self.build_graph(config, is_train)
+            self.inputX = tf.nn.dropout(self.inputX, config.keep_prob)
+        self.build_graph(config, is_train)
 
     @describe
     def build_graph(self, config, is_train):
 
-        self.nn_outputs, self.new_seqLengths = inference(self.inputX,
-                                                         self.seqLengths,
-                                                         config, is_train)
-        self.ctc_input = tf.transpose(self.nn_outputs, perm=[1, 0, 2])
+        self.nn_inputs = window(self.inputX, config.context_len, 1)
+
+        self.nn_outputs,self.seqLengths = inference(self.nn_inputs, self.seqLengths, config,
+                                    is_train)
 
         if is_train:
-            self.label_dense = tf.sparse_tensor_to_dense(self.label_batch)
-            self.ctc_loss = tf.nn.ctc_loss(inputs=self.ctc_input,
-                                           labels=self.label_batch,
-                                           sequence_length=self.new_seqLengths,
-                                           ctc_merge_repeated=True,
-                                           preprocess_collapse_repeated=False,
-                                           time_major=True)
-            self.loss = tf.reduce_sum(self.ctc_loss) / config.batch_size
+            self.loss = tf.nn.softmax_cross_entropy_with_logits(
+                labels=self.labels, logits=self.nn_outputs)
             self.global_step = tf.Variable(0, trainable=False)
             self.reset_global_step = tf.assign(self.global_step, 1)
 
@@ -171,14 +160,6 @@ class Attention(object):
             self.learning_rate = tf.train.exponential_decay(
                 initial_learning_rate, self.global_step, self.config.decay_step,
                 self.config.lr_decay, name='lr')
-            if config.warmup:
-                self.warmup_lr = tf.train.polynomial_decay(5e-3,
-                                                           self.global_step,
-                                                           40000, 1.35e-3, 0.5)
-                self.post_lr = tf.train.exponential_decay(
-                    1.5e-3, self.global_step, self.config.decay_step,
-                    self.config.lr_decay, name='lr')
-                self.learning_rate = tf.minimum(self.warmup_lr, self.post_lr)
 
             if config.optimizer == 'adam':
                 self.optimizer = tf.train.AdamOptimizer(self.learning_rate)
@@ -201,15 +182,10 @@ class Attention(object):
                 zip(self.grads, self.vs),
                 global_step=self.global_step)
         else:
-            self.ctc_input = tf.transpose(self.ctc_input, perm=[1, 0, 2])
-            self.softmax = tf.nn.softmax(self.ctc_input, name='softmax')
-            # self.ctc_decode_input = tf.log(self.softmax, name='ctc_input')
-            # self.ctc_decode_result, self.ctc_decode_log_prob = tf.nn.ctc_beam_search_decoder(
-            #     self.ctc_decode_input, self.new_seqLengths,
-            #     beam_width=config.beam_size, top_paths=1)
-            # self.dense_output = tf.sparse_tensor_to_dense(
-            #     self.ctc_decode_result[0], default_value=-1,
-            #     name='dense_output')
+            self.softmax = tf.nn.softmax(self.nn_outputs, name='softmax')
+            self.outputs = tf.where(tf.greater(self.softmax, config.thres),
+                                    tf.ones_like(self.softmax),
+                                    tf.zeros_like(self.softmax))
 
 
 class DeployModel(object):
@@ -247,7 +223,7 @@ class DeployModel(object):
         self.linearspec = tf.abs(tf.spectral.rfft(self.frames, [400]))
 
         if config.mfcc:
-            self.melspec = mfcc(self.linearspec, config,batch_size=1)
+            self.melspec = mfcc(self.linearspec, config, batch_size=1)
         else:
             self.mel_basis = librosa.filters.mel(
                 sr=config.samplerate,
@@ -258,7 +234,8 @@ class DeployModel(object):
             self.mel_basis = tf.constant(value=self.mel_basis, dtype=tf.float32)
             self.mel_basis = tf.expand_dims(self.mel_basis, 0)
 
-            self.melspec = tf.matmul(self.linearspec, self.mel_basis, name='mel')
+            self.melspec = tf.matmul(self.linearspec, self.mel_basis,
+                                     name='mel')
 
         # self.melspec = tf.expand_dims(self.melspec, 0)
 
@@ -272,6 +249,7 @@ class DeployModel(object):
                                                          batch_size=1)
 
         self.softmax = tf.nn.softmax(self.nn_outputs, name='softmax')
+
 
 if __name__ == "__main__":
     pass
