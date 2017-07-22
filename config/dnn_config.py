@@ -29,16 +29,16 @@ class Config(object):
         self.graph_path = './graph/mel/'
         self.graph_name = 'graph.pb'
         #
-        # self.train_path = '/ssd/liuziqi/vad/train/'
-        # self.valid_path = '/ssd/liuziqi/vad/valid/'
-        # self.noise_path = '/ssd/liuziqi/vad/noise/'
+        self.train_path = '/ssd/liuziqi/vad/train/'
+        self.valid_path = '/ssd/liuziqi/vad/valid/'
+        self.noise_path = '/ssd/liuziqi/vad/noise/'
         self.model_name = 'latest.ckpt'
-        self.rawdata_path = './rawdata/'
-        # self.rawdata_path = '/ssd/vad/'
+        # self.rawdata_path = './rawdata/'
+        self.rawdata_path = '/ssd/keyword/'
         # self.data_path = './test/data/azure_garbage/'
-        self.train_path = './data/train/'
-        self.valid_path = './data/valid/'
-        self.noise_path = './data/noise/'
+        # self.train_path = './data/train/'
+        # self.valid_path = './data/valid/'
+        # self.noise_path = './data/noise/'
 
         # training flags
         self.reset_global = 0
@@ -63,16 +63,18 @@ class Config(object):
         self.n_mel = 26
         self.fmin = 300
         self.fmax = 8000
-        self.context_len = 5
+        self.validlen = 80000
+
 
         # noise flags
         self.use_white_noise = False
         self.bg_decay_max_db = -5
-        self.bg_decay_min_db = 5
+        self.bg_decay_min_db = 0
         self.bg_noise_prob = 0.5
 
         # model params
         self.num_layers = 2
+        self.context_len = 5
         self.max_grad_norm = -1
         self.keep_prob = 0.9
         self.hidden_size = 128

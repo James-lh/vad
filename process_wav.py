@@ -21,7 +21,7 @@ from utils.common import check_dir, path_join, increment_id
 config = get_config()
 
 wave_train_dir = config.rawdata_path + 'train/'
-wave_valid_dir = config.rawdata_path + 'valid/'
+wave_valid_dir = config.rawdata_path + 'valid/vad/'
 wave_noise_dir = config.rawdata_path + 'noise/'
 
 save_train_dir = config.train_path
@@ -31,6 +31,8 @@ save_noise_dir = config.noise_path
 global_len = []
 temp_list = []
 error_list = []
+
+validlen = config.validlen
 
 
 def pre_emphasis(signal, coefficient=0.97):
@@ -67,6 +69,7 @@ def process_stft(f):
     linearspec = np.transpose(np.abs(
         librosa.core.stft(y, config.fft_size,
                           config.hop_size)))
+
 
     return linearspec, y
 
@@ -137,6 +140,25 @@ def batch_padding(tup_list):
                             mode='constant', constant_values=0)
         paded_label = np.pad(t[1], pad_width=(
             (0, max_len - t[0].shape[0]), (0, 0)),
+                             mode='constant', constant_values=0)
+
+        new_list.append((paded_wave, paded_label, t[2]))
+    return new_list
+
+
+def batch_padding_valid(tup_list):
+    # tuple : (spec,labels,seqlen)
+    new_list = []
+
+    for t in tup_list:
+        padlen = validlen - len(t[0])
+        pad_left = padlen // 2
+        pad_right = (padlen + 1) // 2
+        paded_wave = np.pad(t[0], pad_width=(
+            (pad_left, pad_right), (0, 0)),
+                            mode='constant', constant_values=0)
+        paded_label = np.pad(t[1], pad_width=(
+            (pad_left, pad_right), (0, 0)),
                              mode='constant', constant_values=0)
 
         new_list.append((paded_wave, paded_label, t[2]))
@@ -216,29 +238,37 @@ def generate_noise_data(path):
         audio_list = pickle.load(f)
         print('read pkl from ', f)
     spec_list = []
-    counter = 0
     record_count = 0
     for i, audio_name in enumerate(audio_list):
         spec, y = process_stft(path_join(wave_noise_dir, audio_name))
-        spec_list.append(spec)
-        counter += 1
-        if counter == config.tfrecord_size:
-            spec_list = [
-                expand_spectrogram(s, config.max_sequence_length) for s in
-                spec_list]
+        if spec.shape[0] >= config.max_sequence_length:
+            spec_list.extend(
+                split_spectrogram(spec, config.max_sequence_length))
+        else:
+            spec_list.append(
+                expand_spectrogram(spec, config.max_sequence_length))
+
+        if len(spec_list) >= config.tfrecord_size:
 
             fname = 'noise' + increment_id(record_count, 5) + '.tfrecords'
-            ex_list = [make_noise_example(spec) for spec in spec_list]
+            temp = spec_list[:config.tfrecord_size]
+            spec_list = spec_list[config.tfrecord_size:]
+            ex_list = [make_noise_example(spec) for spec in temp]
             writer = tf.python_io.TFRecordWriter(
                 path_join(save_noise_dir, fname))
             for ex in ex_list:
                 writer.write(ex.SerializeToString())
             writer.close()
             record_count += 1
-            counter = 0
-            spec_list.clear()
             print(fname, 'created')
     print('save in %s' % save_noise_dir)
+
+
+def split_spectrogram(spec, target_len):
+    result = []
+    for i in range(0, spec.shape[0] - target_len, target_len):
+        result.append(spec[i:i + target_len])
+    return result
 
 
 def expand_spectrogram(spec, target_len):
@@ -264,7 +294,7 @@ def sort_wave(pkl_path):
     with open(pkl_path + '.sorted', "wb") as f:
         pickle.dump(sorted_data, f)
 
-    y, sr = librosa.load(dir + sorted_data[0][0])
+    y, sr = librosa.load(dir + sorted_data[-1][0])
     print(len(y))
 
 
@@ -273,12 +303,12 @@ if __name__ == '__main__':
     check_dir(save_valid_dir)
     check_dir(save_noise_dir)
 
-    # base_pkl = 'train.pkl'
+    base_pkl = 'vad_train.pkl'
     # sort_wave(wave_train_dir + base_pkl)
     # generate_trainning_data(
     #     wave_train_dir + base_pkl + '.sorted')
 
-    sort_wave(wave_valid_dir + "valid.pkl")
-    generate_valid_data(wave_valid_dir + "valid.pkl.sorted")
+    # sort_wave(wave_valid_dir + "vad_valid.pkl")
+    # generate_valid_data(wave_valid_dir + "vad_valid.pkl.sorted")
 
-    # generate_noise_data(wave_noise_dir + 'noise.pkl')
+    generate_noise_data(wave_noise_dir + 'vad_noise.pkl')
