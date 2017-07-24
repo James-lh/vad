@@ -45,7 +45,7 @@ def generate(path):
 
         noise_db = compute_db(temp)
         factor = wave_db - noise_db + db_decay
-        factor = 10 ** (factor / 20)
+        factor = 10 ** (factor / 10)
         temp *= factor
         y += temp
         librosa.output.write_wav(path_join(save_valid_dir, f), y,
