@@ -24,8 +24,8 @@ class Config(object):
         self.mfcc = False
         self.pre_emphasis = False
 
-        self.model_path = './params/dnn1/'
-        self.save_path = './params/dnn1/'
+        self.model_path = './params/dnn3/'
+        self.save_path = './params/dnn3/'
         self.graph_path = './graph/mel/'
         self.graph_name = 'graph.pb'
         #
@@ -46,7 +46,7 @@ class Config(object):
         self.tfrecord_size = 32
         self.valid_steps = 320
         self.gpu = "0"
-        self.learning_rate = 2e-3
+        self.learning_rate = 3e-3
         self.max_epoch = 200
         self.valid_step = 320
         self.lr_decay = 0.8
@@ -68,18 +68,20 @@ class Config(object):
 
         # noise flags
         self.use_white_noise = False
-        self.bg_decay_max_db = -5
-        self.bg_decay_min_db = 0
-        self.bg_noise_prob = 0.5
+        self.bg_decay_max_db = 0
+        self.bg_decay_min_db = -5
+        self.bg_noise_prob = 0.8
 
         # model params
         self.num_layers = 2
-        self.context_len = 5
-        self.max_grad_norm = -1
-        self.keep_prob = 0.9
+        self.context_len = 10
+        self.max_grad_norm = 5
+        self.keep_prob = 0.7
         self.hidden_size = 128
-        self.num_classes = 1
+        self.num_classes = 2
         self.res = False
+        self.shift = False
+        self.concat =False
 
         # valid params
         self.thres = 0.5

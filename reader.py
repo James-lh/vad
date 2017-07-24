@@ -73,7 +73,7 @@ class DataSet(object):
         seq_features = {
             "audio": tf.FixedLenSequenceFeature([self.last_dim],
                                                 dtype=tf.float32),
-            "label": tf.FixedLenSequenceFeature([1],
+            "label": tf.FixedLenSequenceFeature([self.config.num_classes],
                                                 dtype=tf.int64)
         }
 
@@ -111,7 +111,7 @@ class DataSet(object):
         seq_features = {
             "audio": tf.FixedLenSequenceFeature([self.last_dim],
                                                 dtype=tf.float32),
-            "label": tf.FixedLenSequenceFeature([1],
+            "label": tf.FixedLenSequenceFeature([self.config.num_classes],
                                                 dtype=tf.int64)
         }
 
@@ -244,7 +244,7 @@ class DataSet(object):
         stager = data_flow_ops.StagingArea(
             [tf.float32, tf.int64, tf.int32],
             shapes=[(self.config.batch_size, None, self.config.freq_size),
-                    (self.config.batch_size, None, 1),
+                    (self.config.batch_size, None, self.config.num_classes),
                     (self.config.batch_size,)])
 
         stage_op = stager.put((melspec, labels, seq_len))
@@ -268,7 +268,7 @@ class DataSet(object):
         stager = data_flow_ops.StagingArea(
             [tf.float32, tf.int64, tf.int32],
             shapes=[(self.config.batch_size, None, self.config.freq_size),
-                    (self.config.batch_size, None, 1),
+                    (self.config.batch_size, None, self.config.num_classes),
                     (self.config.batch_size,)])
 
         stage_op = stager.put(

@@ -26,11 +26,11 @@ import numpy as np
 import tensorflow as tf
 from glob import glob
 from tensorflow.python.framework import graph_util
-from config import attention_config, rnn_config,dnn_config
+from config import dnn_config
 from models import dnn
 from reader import read_dataset
 from utils.common import check_dir, path_join
-from utils.prediction import frame_accurcacy
+from utils.prediction import frame_accurcacy, posterior_predict
 
 from utils.wer import WERCalculator
 
@@ -84,15 +84,15 @@ class Runner(object):
             sess.run(tf.local_variables_initializer())
             tf.Graph.finalize(graph)
 
-            best_accuracy = 0
+            best_accuracy = 1
             accu_loss = 0
             st_time = time.time()
             epoch_step = config.tfrecord_size * self.data.train_file_size // config.batch_size
             if os.path.exists(path_join(self.config.save_path, 'best.pkl')):
                 with open(path_join(self.config.save_path, 'best.pkl'),
                           'rb') as f:
-                    best_miss, best_false = pickle.load(f)
-                    print('best miss', best_miss, 'best false', best_false)
+                    best_accuracy = pickle.load(f)
+                    print('best accuracy', best_accuracy)
             else:
                 print('best not exist')
 
@@ -112,15 +112,14 @@ class Runner(object):
                                 step, self.config.save_path))
                         saver.save(sess, save_path=(
                             path_join(self.config.save_path, 'latest.ckpt')))
-                        print('best miss rate:%f\tbest false rate %f' % (
-                            best_miss, best_false))
+                        print('best accuracy', best_accuracy)
                     sys.exit(0)
 
                 signal.signal(signal.SIGINT, handler_stop_signals)
                 signal.signal(signal.SIGTERM, handler_stop_signals)
 
                 best_list = []
-                best_threshold = 0.9
+                best_threshold = 0.1
                 best_count = 0
                 # (miss,false,step,best_count)
 
@@ -138,16 +137,7 @@ class Runner(object):
                     for i in va:
                         print(i.name)
                     while self.epoch < self.config.max_epoch:
-
-                        # _, _, x, lab, step = sess.run(
-                        #     [self.train_model.stage_op,
-                        #      self.train_model.input_filequeue_enqueue_op,
-                        #      self.train_model.ctc_input,
-                        #      self.train_model.label_batch,
-                        #      self.train_model.global_step])
-                        # print(x.shape)
-                        # print(lab)
-                        _, _, _, _, _, l, lr, step, grads = sess.run(
+                        _, _, _, _, _, l, lr, step, grads, vs = sess.run(
                             [self.train_model.train_op,
                              self.data.noise_stage_op,
                              self.data.noise_filequeue_enqueue_op,
@@ -156,8 +146,16 @@ class Runner(object):
                              self.train_model.loss,
                              self.train_model.learning_rate,
                              self.train_model.global_step,
-                             self.train_model.grads
+                             self.train_model.grads,
+                             self.train_model.vs
                              ])
+                        # print('-'*30)
+                        # for i in vs:
+                        #     print(i.sum())
+                        # print('grads',len(grads))
+                        # print('='*30)
+                        # for g in grads:
+                        #     print(g.sum())
                         epoch = step // epoch_step
                         accu_loss += l
                         if epoch > self.epoch:
@@ -170,20 +168,24 @@ class Runner(object):
                                 path_join(self.config.save_path,
                                           'latest.ckpt')))
                             accu_loss = 0
-                        if step % config.valid_step == 0:
+                        if step % config.valid_step == 2:
                             print('epoch time ', (time.time() - last_time) / 60)
                             last_time = time.time()
 
-                            total = 0
-                            wrong = 0
+                            total_speech = 0
+                            total_silence = 0
+                            total_miss = 0
+                            total_false = 0
                             valid_batch = self.data.valid_file_size * config.tfrecord_size // config.batch_size
                             text = ""
                             for i in range(valid_batch):
-                                logits, labels, _, _ = sess.run(
-                                    [self.valid_model.outputs,
-                                     self.valid_model.labels,
-                                     self.valid_model.stage_op,
-                                     self.valid_model.input_filequeue_enqueue_op])
+                                soft, labels, seqlen, _, _ = sess.run(
+                                    [
+                                        self.valid_model.softmax,
+                                        self.valid_model.labels,
+                                        self.valid_model.seqLengths,
+                                        self.valid_model.stage_op,
+                                        self.valid_model.input_filequeue_enqueue_op])
                                 np.set_printoptions(precision=4,
                                                     threshold=np.inf,
                                                     suppress=True)
@@ -195,20 +197,31 @@ class Runner(object):
                                 # for i in names:
                                 #     print(i.decode())
                                 # print(softmax.shape)
-                                total_count, wrong_count = frame_accurcacy(
-                                    logits, labels)
-                                total += total_count
-                                wrong += wrong_count
+                                # for i, j in zip(soft, labels):
+                                #     print(np.concatenate((i, j), 1))
+                                #
+                                # for i in range(len(soft)):
+                                #     soft[i][seqlen[i]:] = 0
 
-                            accruracy = 1 - wrong / wrong
+                                logits = posterior_predict(soft, config.thres)
+                                target_speech, target_silence, miss, false_trigger = frame_accurcacy(
+                                    logits, labels, seqlen)
+                                total_speech += target_speech
+                                total_silence += target_silence
+                                total_miss += miss
+                                total_false += false_trigger
+
+                            miss_rate = round(total_miss / total_speech, 4)
+                            false_rate = round(total_false / total_silence, 4)
                             print('--------------------------------')
                             print('epoch %d' % self.epoch)
                             print('training loss:' + str(l))
                             print('learning rate:', lr, 'global step', step)
-                            print('frame accuracy:' + str(accruracy))
+                            print('miss rate:' + str(miss_rate))
+                            print('false rate: ' + str(false_rate))
 
-                            if accruracy > best_accuracy:
-                                best_accuracy = accruracy
+                            if miss_rate + false_trigger < best_accuracy:
+                                best_accuracy = miss_rate + false_trigger
                                 saver.save(sess,
                                            save_path=(path_join(
                                                self.config.save_path,
@@ -216,13 +229,14 @@ class Runner(object):
                                 with open(path_join(
                                         self.config.save_path, 'best.pkl'),
                                         'wb') as f:
-                                    best_tuple = (accruracy,)
+                                    best_tuple = (miss_rate, false_rate)
                                     pickle.dump(best_tuple, f)
-                            if accruracy > best_threshold:
+                            if miss_rate + false_trigger < best_threshold:
                                 best_count += 1
                                 print('best_count', best_count)
-                                best_list.append((accruracy, step,
-                                                  best_count))
+                                best_list.append(
+                                    (miss_rate, false_trigger, step,
+                                     best_count))
                                 saver.save(sess,
                                            save_path=(path_join(
                                                self.config.save_path,

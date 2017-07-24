@@ -25,7 +25,7 @@ from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import math_ops
 
 
-def window(inputs, context_length, frame_step):
+def window(inputs, context_length, frame_step, shift, concat):
     # inputs (b,t,h)
     # return (b,t,5h)
     batch_size, frame_length, features = inputs.get_shape().as_list()
@@ -47,8 +47,17 @@ def window(inputs, context_length, frame_step):
     padding = array_ops.transpose(padding, [1, 2, 0])
     window_frames = array_ops.gather(padding, indices)
     window_frames = array_ops.transpose(window_frames, perm=[3, 0, 1, 2])
+    if shift:
+        min_vector = tf.expand_dims(tf.reduce_min(window_frames, 2), 2)
+        tile_min_vector = tf.tile(min_vector, [1, 1, window_len, 1])
+        window_frames -= tile_min_vector
+        if concat:
+            print(window_frames)
+            print(min_vector)
+            window_frames = tf.concat((window_frames, min_vector), 2)
+
     output = tf.reshape(window_frames,
-                        [batch_size, frame_length, window_len * features])
+                        [batch_size, frame_length, -1], name='window_reshape')
     return output
 
 
@@ -68,9 +77,10 @@ def inference(inputs, seqLengths, config, is_training, batch_size=None,
               activation=tf.nn.relu):
     if not batch_size:
         batch_size = config.batch_size
-
-    layer_inputs = linear_transform(inputs, batch_size,
-                                    (config.context_len * 2 + 1) * config.n_mel,
+    feature_size = (config.context_len * 2 + 1) * config.n_mel
+    if config.concat:
+        feature_size += config.n_mel
+    layer_inputs = linear_transform(inputs, batch_size, feature_size,
                                     config.hidden_size, 'input_linear_weights',
                                     'input_linear_bias')
 
@@ -100,6 +110,7 @@ def inference(inputs, seqLengths, config, is_training, batch_size=None,
 
 class DNN(object):
     def __init__(self, config, input, is_train):
+        print(tf.get_variable_scope().reuse)
         self.config = config
 
         stager, self.stage_op, self.input_filequeue_enqueue_op = input
@@ -112,14 +123,16 @@ class DNN(object):
     @describe
     def build_graph(self, config, is_train):
 
-        self.nn_inputs = window(self.inputX, config.context_len, 1)
-
+        self.nn_inputs = window(self.inputX, config.context_len, 1,
+                                config.shift, config.concat)
         self.nn_outputs = inference(self.nn_inputs, self.seqLengths, config,
                                     is_train)
 
         if is_train:
-            self.loss = tf.nn.softmax_cross_entropy_with_logits(
-                labels=self.labels, logits=self.nn_outputs)
+            self.labels = tf.cast(self.labels, tf.float32)
+            self.xent_loss = tf.nn.softmax_cross_entropy_with_logits(
+                labels=self.labels, logits=self.nn_outputs, name='xent')
+            self.loss = tf.reduce_mean(self.xent_loss, name='loss')
             self.global_step = tf.Variable(0, trainable=False)
             self.reset_global_step = tf.assign(self.global_step, 1)
 
@@ -151,10 +164,15 @@ class DNN(object):
                 zip(self.grads, self.vs),
                 global_step=self.global_step)
         else:
+            self.labels = tf.slice(self.labels, [0, 0, 1], [-1, -1, -1])
+
             self.softmax = tf.nn.softmax(self.nn_outputs, name='softmax')
-            self.outputs = tf.where(tf.greater(self.softmax, config.thres),
-                                    tf.ones_like(self.softmax),
-                                    tf.zeros_like(self.softmax))
+            self.softmax = tf.slice(self.softmax, [0, 0, 1], [-1, -1, -1])
+
+            # self.softmax = tf.squeeze(self.softmax, 2)
+            # self.outputs = tf.where(tf.greater(self.softmax, config.thres),
+            #                         tf.ones_like(self.softmax),
+            #                         tf.zeros_like(self.softmax))
 
 
 class DeployModel(object):

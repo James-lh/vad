@@ -101,8 +101,11 @@ def get_args():
     parser.add_argument('--n_mfcc', help='mfcc number', type=int, default=None)
     parser.add_argument('--pre_emphasis', help='pre_emphasis', type=int,
                         default=None)
-    parser.add_argument('-var', '--variational_recurrent',
-                        help='variational_recurrent', type=int,
+    parser.add_argument('--res', help='res net', type=int,
+                        default=None)
+    parser.add_argument('--shift', help='min vector shift', type=int,
+                        default=None)
+    parser.add_argument('--concat', help='concat min vector', type=int,
                         default=None)
 
     flags = parser.parse_args().__dict__

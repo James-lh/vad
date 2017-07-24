@@ -17,6 +17,7 @@ from config.dnn_config import get_config
 import pickle
 import tensorflow as tf
 from utils.common import check_dir, path_join, increment_id
+from utils.shape import dense_to_ont_hot
 
 config = get_config()
 
@@ -53,13 +54,15 @@ def point2frame(point, step_size=config.hop_size):
     return point / step_size
 
 
-def convert_label(times, seq_len):
-    label = np.zeros([seq_len, 1], dtype=np.int32)
+def convert_label(times, seq_len, num_classes):
+    label = np.zeros([seq_len], dtype=np.int32)
     for start, end in times:
+        # print(start,end)
         fr_start = time2frame(start)
         fr_end = time2frame(end)
+        # print(fr_start, fr_end)
         label[fr_start:fr_end + 1] = 1
-    return label
+    return dense_to_ont_hot(label, num_classes)
 
 
 def process_stft(f):
@@ -69,7 +72,6 @@ def process_stft(f):
     linearspec = np.transpose(np.abs(
         librosa.core.stft(y, config.fft_size,
                           config.hop_size)))
-
 
     return linearspec, y
 
@@ -93,7 +95,7 @@ def make_record(f, label):
     # print(text)
     spectrogram, wave = process_stft(f)
     seq_len = spectrogram.shape[0]
-    label = convert_label(label, seq_len)
+    label = convert_label(label, seq_len, config.num_classes)
 
     return spectrogram, seq_len, label
 
@@ -180,7 +182,6 @@ def generate_trainning_data(path):
             path_join(wave_train_dir, audio_name),
             label_list[i])
         counter += 1
-
         tuple_list.append((spec, labels, seq_len))
         if counter == config.tfrecord_size:
             tuple_list = batch_padding(tuple_list)
@@ -210,6 +211,8 @@ def generate_valid_data(path):
     counter = 0
     record_count = 0
     for i, audio_name in enumerate(file_list):
+        # print(audio_name)
+        # print(label_list[i])
         spec, seq_len, labels = make_record(
             path_join(wave_valid_dir, audio_name),
             label_list[i])
@@ -309,6 +312,6 @@ if __name__ == '__main__':
     #     wave_train_dir + base_pkl + '.sorted')
 
     # sort_wave(wave_valid_dir + "vad_valid.pkl")
-    # generate_valid_data(wave_valid_dir + "vad_valid.pkl.sorted")
+    generate_valid_data(wave_valid_dir + "vad_valid.pkl.sorted")
 
-    generate_noise_data(wave_noise_dir + 'vad_noise.pkl')
+    # generate_noise_data(wave_noise_dir + 'vad_noise.pkl')

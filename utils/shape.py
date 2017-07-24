@@ -104,3 +104,9 @@ def frame(y, n_fft=400, hop_length=160, win_length=400, window='hann',
 
     return (y_frames * fft_window).T
 
+
+def dense_to_ont_hot(labels_dense, num_classes):
+    len = labels_dense.shape[0]
+    labels_one_hot = np.zeros((len, num_classes), dtype=np.int32)
+    labels_one_hot[np.arange(len), labels_dense] = 1
+    return labels_one_hot

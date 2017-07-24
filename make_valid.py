@@ -17,7 +17,7 @@ from utils.signal import compute_db
 import librosa
 import random
 
-db_decay = 5
+db_decay = -5
 noise_file = '/ssd/keyword/noise/babble.wav'
 
 from config.dnn_config import get_config
