@@ -128,7 +128,6 @@ def inference(inputs, seqLengths, config, is_training, batch_size=None):
     return outputs, seqLengths
 
 
-
 class DNN(object):
     def __init__(self, config, input, is_train):
         self.config = config
@@ -145,12 +144,15 @@ class DNN(object):
 
         self.nn_inputs = window(self.inputX, config.context_len, 1)
 
-        self.nn_outputs,self.seqLengths = inference(self.nn_inputs, self.seqLengths, config,
-                                    is_train)
+        self.nn_outputs, self.seqLengths = inference(self.nn_inputs,
+                                                     self.seqLengths, config,
+                                                     is_train)
 
         if is_train:
-            self.loss = tf.nn.softmax_cross_entropy_with_logits(
-                labels=self.labels, logits=self.nn_outputs)
+            self.labels = tf.cast(self.labels, tf.float32)
+            self.xent_loss = tf.nn.softmax_cross_entropy_with_logits(
+                labels=self.labels, logits=self.nn_outputs, name='xent')
+            self.loss = tf.reduce_mean(self.xent_loss, name='loss')
             self.global_step = tf.Variable(0, trainable=False)
             self.reset_global_step = tf.assign(self.global_step, 1)
 
@@ -182,10 +184,10 @@ class DNN(object):
                 zip(self.grads, self.vs),
                 global_step=self.global_step)
         else:
+            self.labels = tf.slice(self.labels, [0, 0, 1], [-1, -1, -1])
+
             self.softmax = tf.nn.softmax(self.nn_outputs, name='softmax')
-            self.outputs = tf.where(tf.greater(self.softmax, config.thres),
-                                    tf.ones_like(self.softmax),
-                                    tf.zeros_like(self.softmax))
+            self.softmax = tf.slice(self.softmax, [0, 0, 1], [-1, -1, -1])
 
 
 class DeployModel(object):
@@ -196,23 +198,7 @@ class DeployModel(object):
         are exposed for streaming decoding. All operators are placed in CPU.
         Padding should be done before data is fed.
         """
-
-        # input place holder
         config.keep_prob = 1
-
-        # with tf.device('/cpu:0'):
-        #
-        # self.inputX = tf.placeholder(dtype=tf.float32,
-        #                              shape=[None, config.fft_size],
-        #                              name='inputX')
-        #
-        # complex_tensor = tf.complex(
-        #     self.inputX,
-        #     imag=tf.zeros_like(self.inputX, dtype=tf.float32),
-        #     name='complex_tensor')
-        # abs = tf.abs(
-        #     tf.fft(complex_tensor, name='fft'))
-        # print(abs)
 
         self.inputX = tf.placeholder(dtype=tf.float32,
                                      shape=[None, ],
@@ -249,6 +235,8 @@ class DeployModel(object):
                                                          batch_size=1)
 
         self.softmax = tf.nn.softmax(self.nn_outputs, name='softmax')
+        self.softmax = tf.slice(self.softmax, [0, 0, 1], [-1, -1, -1],
+                                name='output_prob')
 
 
 if __name__ == "__main__":

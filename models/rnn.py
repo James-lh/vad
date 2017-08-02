@@ -5,7 +5,7 @@
 @author: ZiqiLiu
 
 
-@file: rnn_ctc.py
+@file: rnn.py
 
 @time: 2017/5/18 上午11:04
 
@@ -54,17 +54,12 @@ class GRU(object):
         self.nn_outputs, _ = inference1(config, self.inputX,
                                         self.seqLengths, is_train)
         self.fc_outputs = inference2(self.nn_outputs, config)
-        self.ctc_input = tf.transpose(self.fc_outputs, perm=[1, 0, 2])
 
         if is_train:
-            self.label_dense = tf.sparse_tensor_to_dense(self.label_batch)
-            self.ctc_loss = tf.nn.ctc_loss(inputs=self.ctc_input,
-                                           labels=self.label_batch,
-                                           sequence_length=self.seqLengths,
-                                           ctc_merge_repeated=True,
-                                           preprocess_collapse_repeated=False,
-                                           time_major=True)
-            self.loss = tf.reduce_sum(self.ctc_loss) / config.batch_size
+            self.labels = tf.cast(self.labels, tf.float32)
+            self.xent_loss = tf.nn.softmax_cross_entropy_with_logits(
+                labels=self.labels, logits=self.fc_outputs, name='xent')
+            self.loss = tf.reduce_mean(self.xent_loss, name='loss')
             self.global_step = tf.Variable(0, trainable=False)
             self.reset_global_step = tf.assign(self.global_step, 1)
 
@@ -74,14 +69,6 @@ class GRU(object):
             self.learning_rate = tf.train.exponential_decay(
                 initial_learning_rate, self.global_step, self.config.decay_step,
                 self.config.lr_decay, name='lr')
-            if config.warmup:
-                self.warmup_lr = tf.train.polynomial_decay(5e-3,
-                                                           self.global_step,
-                                                           40000, 1.35e-3, 0.5)
-                self.post_lr = tf.train.exponential_decay(
-                    1.5e-3, self.global_step, self.config.decay_step,
-                    self.config.lr_decay, name='lr')
-                self.learning_rate = tf.minimum(self.warmup_lr, self.post_lr)
 
             if config.optimizer == 'adam':
                 self.optimizer = tf.train.AdamOptimizer(self.learning_rate)
@@ -95,25 +82,19 @@ class GRU(object):
             self.vs = tf.trainable_variables()
             grads_and_vars = self.optimizer.compute_gradients(self.loss,
                                                               self.vs)
-            grads_and_vars = [(g, v) for g, v in grads_and_vars if
-                              g is not None]
             self.grads = [grad for (grad, var) in grads_and_vars]
             self.vs = [var for (grad, var) in grads_and_vars]
             if config.max_grad_norm > 0:
-                self.grads, hehe = tf.clip_by_global_norm(
+                self.grads, _ = tf.clip_by_global_norm(
                     self.grads, config.max_grad_norm)
             self.train_op = self.optimizer.apply_gradients(
                 zip(self.grads, self.vs),
                 global_step=self.global_step)
         else:
-            self.ctc_input = tf.transpose(self.ctc_input, perm=[1, 0, 2])
-            self.softmax = tf.nn.softmax(self.ctc_input, name='softmax')
-            # self.ctc_decode_input = tf.log(self.softmax)
-            # self.ctc_decode_result, self.ctc_decode_log_prob = tf.nn.ctc_beam_search_decoder(
-            #     self.ctc_decode_input, self.seqLengths,
-            #     beam_width=config.beam_size, top_paths=1)
-            # self.dense_output = tf.sparse_tensor_to_dense(
-            #     self.ctc_decode_result[0], default_value=-1)
+            self.labels = tf.slice(self.labels, [0, 0, 1], [-1, -1, -1])
+
+            self.softmax = tf.nn.softmax(self.fc_outputs, name='softmax')
+            self.softmax = tf.slice(self.softmax, [0, 0, 1], [-1, -1, -1])
 
 
 class DeployModel(object):
@@ -137,30 +118,26 @@ class DeployModel(object):
                  1,
                  config.hidden_size],
                 name='rnn_initial_states')
-            # self.inputX = tf.placeholder(dtype=tf.float32,
-            #                              shape=[None, ],
-            #                              name='inputX')
-            #
-            # self.inputX = tf.expand_dims(self.inputX, 0)
-            # self.frames = tf_frame(self.inputX, 400, 160, name='frame')
-            #
-            # self.linearspec = tf.abs(tf.spectral.rfft(self.frames, [400]))
-            #
-            # self.mel_basis = librosa.filters.mel(
-            #     sr=config.samplerate,
-            #     n_fft=config.fft_size,
-            #     fmin=config.fmin,
-            #     fmax=config.fmax,
-            #     n_mels=config.freq_size).T
-            # self.mel_basis = tf.constant(value=self.mel_basis, dtype=tf.float32)
-            # self.mel_basis = tf.expand_dims(self.mel_basis, 0)
-            #
-            # self.melspec = tf.matmul(self.linearspec, self.mel_basis,
-            #                          name='mel')
             self.inputX = tf.placeholder(dtype=tf.float32,
-                                         shape=[None, config.freq_size],
+                                         shape=[None, ],
                                          name='inputX')
-            self.melspec = tf.expand_dims(self.inputX, 0)
+
+            self.inputX = tf.expand_dims(self.inputX, 0)
+            self.frames = tf_frame(self.inputX, 400, 160, name='frame')
+
+            self.linearspec = tf.abs(tf.spectral.rfft(self.frames, [400]))
+
+            self.mel_basis = librosa.filters.mel(
+                sr=config.samplerate,
+                n_fft=config.fft_size,
+                fmin=config.fmin,
+                fmax=config.fmax,
+                n_mels=config.freq_size).T
+            self.mel_basis = tf.constant(value=self.mel_basis, dtype=tf.float32)
+            self.mel_basis = tf.expand_dims(self.mel_basis, 0)
+
+            self.melspec = tf.matmul(self.linearspec, self.mel_basis,
+                                     name='mel')
 
             self.seqLengths = tf.expand_dims(tf.shape(self.melspec)[1], 0)
             rnn_initial_states = tuple(tf.unstack(self._rnn_initial_states))
@@ -169,20 +146,11 @@ class DeployModel(object):
                                                      is_training=False,
                                                      initial_state=rnn_initial_states)
             self.rnn_states = tf.stack(rnn_states, name="rnn_states")
-            self.linear_output = inference2(self.nn_outputs, config,1)
+            self.linear_output = inference2(self.nn_outputs, config, 1)
 
             self.softmax = tf.nn.softmax(self.linear_output, name='softmax')
-            # ctc_decode_input = tf.log(self.softmax)
-            # self.ctc_decode_input = tf.concat(
-            #     [self._prev_ctc_decode_inputs, ctc_decode_input], axis=1,
-            #     name="ctc_decode_inputs")
-            # self.ctc_decode_result, self.ctc_decode_log_prob = tf.nn.ctc_beam_search_decoder(
-            #     self.ctc_decode_input, self.seqLengths,
-            #     beam_width=config.beam_size, top_paths=1)
-            # self.dense_output = tf.sparse_tensor_to_dense(
-            #     self.ctc_decode_result[0], default_value=-1,
-            #     name='dense_output')
-
+            self.softmax = tf.slice(self.softmax, [0, 0, 1], [-1, -1, -1],
+                                    name='output_prob')
 
 
 def get_cell(config, is_training):
