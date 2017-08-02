@@ -128,7 +128,7 @@ def inference(inputs, seqLengths, config, is_training, batch_size=None):
     return outputs, seqLengths
 
 
-class DNN(object):
+class Attention(object):
     def __init__(self, config, input, is_train):
         self.config = config
 

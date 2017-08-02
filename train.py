@@ -26,8 +26,7 @@ import numpy as np
 import tensorflow as tf
 from glob import glob
 from tensorflow.python.framework import graph_util
-from config import dnn_config
-from models import dnn
+from models import dnn, rnn, attention
 from reader import read_dataset
 from utils.common import check_dir, path_join
 from utils.prediction import frame_accurcacy, posterior_predict
@@ -339,9 +338,23 @@ if __name__ == '__main__':
     flags, model = parse_args()
     print(flags)
     if model == 'dnn':
-        config = dnn_config.get_config()
+        from config.dnn_config import get_config
+
+        config = get_config()
         TrainingModel = dnn.DNN
         DeployModel = dnn.DeployModel
+    elif model == 'rnn':
+        from config.rnn_config import get_config
+
+        config = get_config()
+        TrainingModel = rnn.GRU
+        DeployModel = rnn.DeployModel
+    elif model == 'attention':
+        from config.attention_config import get_config
+
+        config = get_config()
+        TrainingModel = attention.Attention
+        DeployModel = attention.DeployModel
     else:
         raise Exception('model %s not defined!' % model)
     for key in flags:
